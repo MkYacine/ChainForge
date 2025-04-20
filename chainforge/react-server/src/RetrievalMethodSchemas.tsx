@@ -783,7 +783,7 @@ export const PineconeSchema: ModelSettingsDict = {
         type: "string",
         default: "cosine",
         title: "Distance Metric",
-        enum: ["cosine", "euclidean", "dotproduct"],
+        enum: ["cosine", "l2", "dotproduct"],
         description:
           "Select the similarity measure used for retrieval: Cosine, Euclidean, or Dot Product.",
       },
@@ -852,7 +852,7 @@ export const PineconeSchema: ModelSettingsDict = {
       "ui:options": {
         enumOptions: [
           { label: "Cosine Similarity", value: "cosine" },
-          { label: "Euclidean Distance", value: "euclidean" },
+          { label: "Euclidean Distance", value: "l2" },
           { label: "Dot Product", value: "dotproduct" },
         ],
       },
