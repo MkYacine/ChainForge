@@ -10,13 +10,13 @@ export const OverlappingLangChainSchema: ModelSettingsDict = {
     type: "object",
     required: ["chunk_size", "chunk_overlap"],
     properties: {
-      chunk_size: { type: "number", default: 300, title: "Chunk Size" },
-      chunk_overlap: { type: "number", default: 50, title: "Overlap" },
+      chunk_size: { type: "number", default: 300, title: "Chunk Size (chars)" },
+      chunk_overlap: { type: "number", default: 50, title: "Overlap (chars)" },
     },
   },
   uiSchema: {
     chunk_size: {
-      "ui:widget": "range", // HTML range input
+      "ui:widget": "range",
       "ui:options": {
         min: 100,
         max: 2000,
@@ -43,37 +43,47 @@ export const OverlappingOpenAITiktokenSchema: ModelSettingsDict = {
   description: "Chunk text using the OpenAI tiktoken library with overlap.",
   schema: {
     type: "object",
-    required: ["max_tokens", "overlap_tokens"],
+    required: ["chunk_size", "chunk_overlap", "model_name"],
     properties: {
-      max_tokens: {
+      chunk_size: {
         type: "number",
-        default: 1024,
-        title: "Max tokens per chunk",
+        default: 200,
+        title: "Chunk Size (tokens)",
       },
-      overlap_tokens: {
+      chunk_overlap: {
         type: "number",
-        default: 20,
-        title: "Overlap tokens",
+        default: 50,
+        title: "Overlap (tokens)",
       },
+      model_name: {
+        type: "string",
+        default: "gpt-3.5-turbo",
+        title: "OpenAI Model (for Tokenizer)",
+        description: "Specifies which model's tokenizer to use (e.g., gpt-4, gpt-3.5-turbo). Affects how text is split into tokens.",
+        enum: ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo", "text-embedding-3-large", "text-embedding-3-small", "text-embedding-ada-002"],
+      }
     },
   },
   uiSchema: {
-    max_tokens: {
+    chunk_size: {
       "ui:widget": "range",
       "ui:options": {
-        min: 256,
+        min: 50,
         max: 8192,
-        step: 256,
+        step: 50,
       },
     },
-    overlap_tokens: {
+    chunk_overlap: {
       "ui:widget": "range",
       "ui:options": {
         min: 0,
         max: 500,
-        step: 25,
+        step: 10,
       },
     },
+    model_name: {
+        "ui:widget": "select",
+    }
   },
   postprocessors: {},
 };
@@ -83,34 +93,51 @@ export const OverlappingOpenAITiktokenSchema: ModelSettingsDict = {
  */
 export const OverlappingHuggingfaceTokenizerSchema: ModelSettingsDict = {
   fullName: "Overlapping + HuggingFace Tokenizers",
-  description: "Chunk text using HuggingFace tokenizer-based segmentation.",
+  description: "Chunk text using HuggingFace tokenizer-based segmentation with overlap.",
   schema: {
     type: "object",
-    required: ["tokenizer_model", "chunk_size"],
+    required: ["model_name", "chunk_size", "chunk_overlap"],
     properties: {
-      tokenizer_model: {
+      model_name: {
         type: "string",
         default: "bert-base-uncased",
-        title: "Tokenizer Model",
-        enum: ["bert-base-uncased", "roberta-base", "gpt2"],
+        title: "HuggingFace Model (for Tokenizer)",
+        description: "Identifier of the HF model whose tokenizer to use (e.g., bert-base-uncased, distilbert-base-uncased).",
+        enum: ["bert-base-uncased", "distilbert-base-uncased", "roberta-base", "gpt2", "sentence-transformers/all-MiniLM-L6-v2"],
       },
       chunk_size: {
         type: "number",
-        default: 300,
-        title: "Approx. tokens per chunk",
+        default: 200,
+        title: "Chunk Size (tokens)",
+      },
+      chunk_overlap: {
+        type: "number",
+        default: 50,
+        title: "Overlap (tokens)",
       },
     },
   },
   uiSchema: {
-    tokenizer_model: {
-      "ui:widget": "select", // display as a dropdown
+    model_name: {
+      "ui:widget": "select",
+       "ui:options": {
+           "placeholder": "Select or type a HuggingFace model ID"
+       }
     },
     chunk_size: {
       "ui:widget": "range",
       "ui:options": {
-        min: 100,
+        min: 50,
         max: 2000,
         step: 50,
+      },
+    },
+    chunk_overlap: {
+      "ui:widget": "range",
+      "ui:options": {
+        min: 0,
+        max: 500,
+        step: 10,
       },
     },
   },
@@ -122,9 +149,36 @@ export const OverlappingHuggingfaceTokenizerSchema: ModelSettingsDict = {
  */
 export const SyntaxSpacySchema: ModelSettingsDict = {
   fullName: "Syntax-based spaCy",
-  description: "Splits text into sentences using spaCy.",
-  schema: { type: "object", required: [], properties: {} },
-  uiSchema: {},
+  description: "Splits text into sentences using a specified spaCy language model.",
+  schema: {
+      type: "object",
+      required: ["model_name"],
+      properties: {
+        model_name: {
+            type: "string",
+            default: "en_core_web_sm",
+            title: "SpaCy Language Model",
+            description: "The name of the SpaCy model to use (must be installed). E.g., en_core_web_sm, en_core_web_lg, de_core_news_sm.",
+            enum: [
+                "en_core_web_sm",
+                "en_core_web_md",
+                "en_core_web_lg",
+                "en_core_web_trf",
+                "de_core_news_sm",
+                "es_core_news_sm",
+                "fr_core_news_sm",
+            ],
+        }
+      }
+  },
+  uiSchema: {
+      model_name: {
+          "ui:widget": "select",
+          "ui:options": {
+              "placeholder": "Select or type an installed SpaCy model name"
+          }
+      }
+  },
   postprocessors: {},
 };
 
@@ -133,13 +187,13 @@ export const SyntaxSpacySchema: ModelSettingsDict = {
  */
 export const SyntaxTextTilingSchema: ModelSettingsDict = {
   fullName: "Syntax-based TextTiling",
-  description: "Splits text into multi-sentence segments using TextTiling.",
+  description: "Splits text into multi-sentence topical segments using NLTK's TextTiling.",
   schema: {
     type: "object",
     required: ["w", "k"],
     properties: {
-      w: { type: "number", default: 20, title: "Window size (w)" },
-      k: { type: "number", default: 10, title: "Block comparison size (k)" },
+      w: { type: "number", default: 20, title: "Pseudo-Sentence Block Size (w)" },
+      k: { type: "number", default: 10, title: "Gap Identification Block Count (k)" },
     },
   },
   uiSchema: {
@@ -148,15 +202,15 @@ export const SyntaxTextTilingSchema: ModelSettingsDict = {
       "ui:options": {
         min: 5,
         max: 50,
-        step: 5,
+        step: 1,
       },
     },
     k: {
       "ui:widget": "range",
       "ui:options": {
-        min: 5,
+        min: 2,
         max: 50,
-        step: 5,
+        step: 1,
       },
     },
   },
@@ -366,19 +420,19 @@ export const ChunkMethodGroups = [
       {
         baseMethod: "overlapping_langchain",
         methodName: "Overlapping Chunking",
-        library: "LangChain TextSplitter",
+        library: "LangChain (Chars)",
         emoji: "🌐",
       },
       {
         baseMethod: "overlapping_openai_tiktoken",
         methodName: "Overlapping Chunking",
-        library: "OpenAI tiktoken",
+        library: "OpenAI tiktoken (Tokens)",
         emoji: "🤖",
       },
       {
         baseMethod: "overlapping_huggingface_tokenizers",
         methodName: "Overlapping Chunking",
-        library: "HuggingFace Tokenizers",
+        library: "HuggingFace (Tokens)",
         emoji: "🤗",
       },
     ],
@@ -389,13 +443,13 @@ export const ChunkMethodGroups = [
       {
         baseMethod: "syntax_spacy",
         methodName: "Syntax-Based Chunking",
-        library: "spaCy Sentence Splitter",
+        library: "spaCy (Sentences)",
         emoji: "🐍",
       },
       {
         baseMethod: "syntax_texttiling",
         methodName: "Syntax-Based Chunking",
-        library: "TextTilingTokenizer",
+        library: "NLTK TextTiling (Topics)",
         emoji: "📑",
       },
     ],
