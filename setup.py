@@ -39,6 +39,13 @@ setup(
         "sentence-transformers",
         "rank-bm25",
         "whoosh",
+
+        "torch",
+        "numpy",    
+        "faiss-cpu",  
+        "langchain-community",
+        "pinecone-client",
+        "chromadb",
     ],
     entry_points={
         "console_scripts": [
