@@ -545,13 +545,12 @@ from langchain_core.embeddings import Embeddings
 from typing import List
 import numpy as np
 
+# --- Define DummyEmbeddings Class ---
 class DummyEmbeddings(Embeddings):
     """
     A dummy embedding class implementing the LangChain Embeddings interface.
-    Used when pre-computed embeddings are provided to wrappers.
-    Returns zero vectors of the specified dimension. Useful for loading
-    indexes where the original embedding function is not needed or
-    available, but the LangChain object requires an Embeddings object.
+    Used when pre-computed embeddings are provided.
+    Returns zero vectors of the specified dimension.
     """
     def __init__(self, dimension: int):
         if not isinstance(dimension, int) or dimension <= 0:
@@ -562,13 +561,11 @@ class DummyEmbeddings(Embeddings):
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Return zero vectors for a list of documents."""
-        # Avoid recalculating list of zeros repeatedly
         return [self._zero_vector for _ in texts]
 
     def embed_query(self, text: str) -> List[float]:
         """Return a single zero vector for a query."""
         return self._zero_vector
-
 
 # FAISS
 import faiss
@@ -745,8 +742,6 @@ def handle_faiss(chunk_objs, chunk_embeddings, query_objs, query_embeddings, set
             search_results = vector_store.similarity_search_with_score_by_vector(
                 embedding=query_vec[0], # Pass the 1D vector
                 k=top_k
-                # We will apply the threshold *after* getting results,
-                # as FAISS itself doesn't have a direct similarity threshold in IndexFlat
             )
 
             # === Step 4: Convert results, interpret score based on metric, apply threshold ===
@@ -787,8 +782,6 @@ def handle_faiss(chunk_objs, chunk_embeddings, query_objs, query_embeddings, set
     return results
 
 # PINECONE
-
-# --- NEW Pinecone Handler ---
 @RetrievalMethodRegistry.register("pinecone")
 def handle_pinecone(chunk_objs, chunk_embeddings, query_objs, query_embeddings, settings):
     """
@@ -1091,7 +1084,6 @@ def handle_pinecone(chunk_objs, chunk_embeddings, query_objs, query_embeddings, 
                      # Note: User needs to understand dotproduct scale for threshold setting.
                      print(f"  Match(dotproduct): ID={chunk_id}, Score={score:.4f}, RawThreshold={raw_similarity_threshold}, Passes={passes_threshold}")
                 else:
-                     # Unknown metric - skip thresholding?
                      print(f"[WARN] Unknown similarity function '{similarity_function}' for score interpretation. Passing threshold by default.")
                      passes_threshold = True
 
@@ -1116,4 +1108,225 @@ def handle_pinecone(chunk_objs, chunk_embeddings, query_objs, query_embeddings, 
             final_results.append({'query_object': query_obj, 'retrieved_chunks': []})
 
     print("[DEBUG] Retrieval completed.")
+    return final_results
+
+# CHROMADB
+import chromadb
+import uuid 
+import time
+from langchain_core.embeddings import Embeddings
+from typing import List
+
+@RetrievalMethodRegistry.register("chromadb")
+def handle_chromadb(chunk_objs, chunk_embeddings, query_objs, query_embeddings, settings):
+    """
+    Retrieve chunks using Chroma DB Vector Store with precomputed embeddings.
+    Supports in-memory or persistent storage and cosine/l2/ip metrics.
+    Aligned with standard handler signature and return structure.
+    """
+    print("[ChromaDB] Starting retrieval with Chroma...", flush=True)
+
+    # === Step 1: Extract Settings ===
+    chroma_mode = settings.get("chromaMode", "memory").lower()  # "memory" or "persistent"
+    chroma_path = settings.get("chromaPersistDir", "./chroma_db") # Default path if persistent
+    collection_name = settings.get("chromaCollection", f"collection_{uuid.uuid4().hex[:8]}") # Default unique name
+    # Chroma uses 'l2', 'cosine', 'ip' (inner product)
+    distance_metric = settings.get("chromaDistanceMetric", "cosine").lower()
+    top_k = settings.get("top_k", 5)
+    # similarity_threshold is 0-100 in settings, convert to 0-1
+    raw_similarity_threshold = settings.get("similarity_threshold", 0)
+    try:
+        similarity_threshold = float(raw_similarity_threshold) / 100.0
+        similarity_threshold = max(0.0, min(1.0, similarity_threshold)) # Clamp to [0,1]
+    except ValueError:
+        print(f"[ChromaDB WARN] Invalid similarity_threshold '{raw_similarity_threshold}'. Defaulting to 0.", flush=True)
+        similarity_threshold = 0.0
+
+    cleanup_on_create = settings.get("chromaCleanupOnCreate", True) # bool
+
+    print(f"[ChromaDB] Mode: {chroma_mode}", flush=True)
+    print(f"[ChromaDB] Top K: {top_k}", flush=True)
+    print(f"[ChromaDB] Similarity threshold: {similarity_threshold:.4f}", flush=True)
+    print(f"[ChromaDB] Collection: {collection_name}", flush=True)
+    print(f"[ChromaDB] Metric: {distance_metric}", flush=True)
+    if chroma_mode == "persistent":
+        print(f"[ChromaDB] Persistence path: {chroma_path}", flush=True)
+    print(f"[ChromaDB] Cleanup on create: {cleanup_on_create}", flush=True)
+
+    # Consistent result structure initialization
+    final_results = []
+
+    # === Basic Input Validation ===
+    if not chunk_objs or not chunk_embeddings:
+         print("[ChromaDB ERROR] No chunk objects or chunk embeddings provided.", flush=True)
+         return [{'query_object': q_obj, 'retrieved_chunks': []} for q_obj in query_objs] # Consistent error return
+    if not query_objs or not query_embeddings:
+         print("[ChromaDB ERROR] No query objects or query embeddings provided.", flush=True)
+         return [{'query_object': q_obj, 'retrieved_chunks': []} for q_obj in query_objs] # Consistent error return
+
+    try:
+        if not isinstance(chunk_embeddings[0], list) or not isinstance(query_embeddings[0], list):
+             raise TypeError("Embeddings should be lists of lists of floats.")
+        dimension = len(chunk_embeddings[0])
+        query_dimension = len(query_embeddings[0])
+        if dimension == 0:
+            raise ValueError("Chunk embedding dimension cannot be zero.")
+        if query_dimension == 0:
+             raise ValueError("Query embedding dimension cannot be zero.")
+    except (IndexError, TypeError, ValueError) as e:
+         print(f"[ChromaDB ERROR] Invalid embedding structure or dimension: {e}", flush=True)
+         return [{'query_object': q_obj, 'retrieved_chunks': []} for q_obj in query_objs]
+
+    if dimension != query_dimension:
+         print(f"[ChromaDB ERROR] Embedding dimension mismatch: Chunks({dimension}), Queries({query_dimension})", flush=True)
+         return [{'query_object': q_obj, 'retrieved_chunks': []} for q_obj in query_objs]
+
+    # === Step 2: Initialize Chroma Client ===
+    try:
+        print(f"[ChromaDB] Initializing Chroma client (Mode: {chroma_mode})...", flush=True)
+        if chroma_mode == "persistent":
+            if not os.path.exists(chroma_path):
+                 print(f"[ChromaDB] Creating persistence directory: {chroma_path}", flush=True)
+                 os.makedirs(chroma_path, exist_ok=True)
+            chroma_client = chromadb.PersistentClient(path=chroma_path)
+        else: # memory mode
+            chroma_client = chromadb.Client()
+        print("[ChromaDB] Chroma client initialized.", flush=True)
+
+        # === Step 3: Get or Create Collection ===
+        print(f"[ChromaDB] Accessing collection: '{collection_name}'", flush=True)
+
+        # Handle cleanup if in create mode and collection exists
+        if chroma_mode == "create" and cleanup_on_create:
+             try:
+                 existing_collections = [col.name for col in chroma_client.list_collections()]
+                 if collection_name in existing_collections:
+                      print(f"[ChromaDB] 'create' mode: Deleting existing collection '{collection_name}'...", flush=True)
+                      chroma_client.delete_collection(name=collection_name)
+                      print(f"[ChromaDB] Collection '{collection_name}' deleted.", flush=True)
+                 else:
+                      print(f"[ChromaDB] 'create' mode: Collection '{collection_name}' does not exist, no need to delete.", flush=True)
+             except Exception as e:
+                  print(f"[ChromaDB WARN] Failed to delete collection '{collection_name}' during cleanup: {e}. Proceeding...", flush=True)
+
+        # Validate and set metric
+        if distance_metric not in ['l2', 'cosine', 'ip']:
+            print(f"[ChromaDB WARN] Invalid distance metric '{distance_metric}'. Defaulting to 'cosine'.", flush=True)
+            distance_metric = 'cosine'
+        collection_metadata = {"hnsw:space": distance_metric}
+
+        print(f"[ChromaDB] Getting or creating collection '{collection_name}' with metric '{distance_metric}'...", flush=True)
+        collection = chroma_client.get_or_create_collection(
+            name=collection_name,
+            metadata=collection_metadata
+        )
+        print(f"[ChromaDB] Collection '{collection_name}' ready.", flush=True)
+
+        # === Step 4: Add/Upsert Data ===
+        print(f"[ChromaDB] Preparing {len(chunk_objs)} items for upsert...", flush=True)
+        ids = []
+        embeddings_to_add = []
+        metadatas_to_add = []
+        documents_to_add = [] # Chroma requires text content ('documents')
+
+        for i, chunk in enumerate(chunk_objs):
+            chunk_id = chunk.get("chunkId")
+            if not chunk_id or not isinstance(chunk_id, str) or len(chunk_id.strip()) == 0:
+                 chunk_id = f"chunk_{i}_{uuid.uuid4().hex[:8]}"
+            ids.append(chunk_id)
+            try:
+                embeddings_to_add.append([float(e) for e in chunk_embeddings[i]])
+                metadatas_to_add.append({
+                    "docTitle": chunk.get("docTitle", ""),
+                    "chunkId": chunk_id # Store original/generated ID
+                })
+                documents_to_add.append(chunk.get("text", ""))
+            except (TypeError, ValueError) as e:
+                print(f"[ChromaDB WARN] Skipping chunk ID {chunk_id} due to invalid embedding format: {e}", flush=True)
+                # Remove the ID if the data is invalid
+                ids.pop()
+
+
+        if ids:
+            print(f"[ChromaDB] Upserting {len(ids)} valid items into collection '{collection_name}'...", flush=True)
+            collection.upsert(
+                ids=ids,
+                embeddings=embeddings_to_add,
+                metadatas=metadatas_to_add,
+                documents=documents_to_add
+            )
+            print("[ChromaDB] Upsert operation completed.", flush=True)
+        else:
+             print("[ChromaDB] No valid items to upsert.", flush=True)
+
+
+        # === Step 5: Perform Retrieval ===
+        print("[ChromaDB] Starting retrieval for queries...", flush=True)
+
+        for query_obj, q_embedding in zip(query_objs, query_embeddings):
+            query_text = query_obj.get("text", "N/A")
+            query_short = query_text[:70] + "..." if len(query_text) > 70 else query_text
+            print(f"[ChromaDB] Processing query: '{query_short}'", flush=True)
+            retrieved_chunks_for_query = []
+
+            try:
+                query_embedding_float = [float(e) for e in q_embedding]
+
+                query_results = collection.query(
+                    query_embeddings=[query_embedding_float],
+                    n_results=top_k,
+                    include=['metadatas', 'documents', 'distances']
+                )
+
+                # === Step 6: Process and Format Results ===
+                if query_results and query_results.get('ids') and query_results['ids'][0]:
+                    num_results = len(query_results['ids'][0])
+                    print(f"[ChromaDB] Query returned {num_results} raw results.", flush=True)
+
+                    for i in range(num_results):
+                        distance = query_results['distances'][0][i]
+                        metadata = query_results['metadatas'][0][i]
+                        doc_text = query_results['documents'][0][i]
+                        result_id = query_results['ids'][0][i]
+
+                        similarity_score = 0.0
+                        if distance_metric == 'cosine':
+                            similarity_score = max(0.0, min(1.0, 1.0 - float(distance)))
+                        elif distance_metric == 'l2':
+                            similarity_score = 1.0 / (1.0 + float(distance))
+                        elif distance_metric == 'ip':
+                             # Assume normalized embeddings if IP metric is used for similarity context
+                             similarity_score = max(0.0, min(1.0, float(distance)))
+
+                        if similarity_score >= similarity_threshold:
+                            retrieved_chunks_for_query.append({
+                                "text": doc_text,
+                                "similarity": round(similarity_score, 6),
+                                "docTitle": metadata.get("docTitle", ""),
+                                "chunkId": metadata.get("chunkId", result_id),
+                            })
+                        else:
+                            print(f"[ChromaDB] Result {result_id} skipped due to threshold (Sim: {similarity_score:.4f} < Threshold: {similarity_threshold:.4f})", flush=True)
+
+                    retrieved_chunks_for_query.sort(key=lambda x: x["similarity"], reverse=True)
+                    retrieved_chunks_for_query = retrieved_chunks_for_query[:top_k] 
+
+                    final_results.append({
+                        'query_object': query_obj,
+                        'retrieved_chunks': retrieved_chunks_for_query
+                    })
+                    print(f"[ChromaDB] Retrieved {len(retrieved_chunks_for_query)} chunks for query '{query_short}' after filtering/sorting.", flush=True)
+                else:
+                    print(f"[ChromaDB] No results returned from Chroma query for '{query_short}'.", flush=True)
+                    final_results.append({'query_object': query_obj, 'retrieved_chunks': []})
+
+            except Exception as e:
+                print(f"[ChromaDB ERROR] Failed during query or result processing for query '{query_short}': {e}", flush=True)
+                final_results.append({'query_object': query_obj, 'retrieved_chunks': []})
+
+    except Exception as e:
+        print(f"[ChromaDB FATAL ERROR] Failed during client/collection setup or upsert: {e}", flush=True)
+        final_results = [{'query_object': q_obj, 'retrieved_chunks': []} for q_obj in query_objs]
+
+    print("[ChromaDB] Retrieval process finished.", flush=True)
     return final_results
